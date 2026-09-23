@@ -1,0 +1,204 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Clip Relay</title>
+<style>
+:root{
+  --bg:#1f2335; --bg2:#24283b; --fg:#c0caf5; --muted:#565f89;
+  --accent:#7aa2f7; --accent2:#bb9af7; --ok:#9ece6a; --border:#3b4261;
+}
+*{box-sizing:border-box;}
+html,body{height:100%;}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  display:flex; flex-direction:column; min-height:100%;
+}
+header{padding:16px 18px 8px;}
+h1{font-size:17px; margin:0 0 2px; color:var(--fg);}
+p.sub{margin:0; font-size:13px; color:var(--muted);}
+main{flex:1; padding:12px 18px 24px; display:flex; flex-direction:column; gap:18px; max-width:720px; margin:0 auto; width:100%;}
+.card{background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:14px;}
+.card h2{font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 10px;}
+#editor{
+  min-height:110px; max-height:260px; overflow:auto; border-radius:8px;
+  background:#1a1b26; border:1px solid var(--border); padding:10px;
+  font-family:'SF Mono',Consolas,monospace; font-size:13px; outline:none; white-space:pre-wrap;
+}
+#editor:empty:before{content:attr(data-placeholder); color:var(--muted);}
+#preview{
+  min-height:80px; max-height:260px; overflow:auto; border-radius:8px;
+  background:#1a1b26; border:1px solid var(--border); padding:10px;
+  font-family:'SF Mono',Consolas,monospace; font-size:13px; white-space:pre-wrap;
+}
+.row{display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;}
+button{
+  border:none; border-radius:8px; padding:10px 16px; font-size:14px; font-weight:600;
+  cursor:pointer; color:#1a1b26; background:var(--accent);
+}
+button.secondary{background:var(--accent2);}
+button:disabled{opacity:.45; cursor:default;}
+.status{font-size:12px; color:var(--muted); margin-top:8px; min-height:16px;}
+.status.ok{color:var(--ok);}
+.meta{font-size:11px; color:var(--muted); margin-top:6px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎨 Clip Relay</h1>
+  <p class="sub">Paste colored code on one device, copy it rich on another.</p>
+</header>
+<main>
+  <div class="card">
+    <h2>1 · Paste here (from VS Code)</h2>
+    <div id="editor" contenteditable="true" data-placeholder="Copy code in VS Code, then paste (Ctrl+V) here…"></div>
+    <div class="row">
+      <button id="sendBtn">Send to relay</button>
+    </div>
+    <div class="status" id="sendStatus"></div>
+  </div>
+
+  <div class="card">
+    <h2>2 · Latest snippet</h2>
+    <div id="preview">Loading…</div>
+    <div class="row">
+      <button id="copyBtn" class="secondary" disabled>Copy rich text</button>
+    </div>
+    <div class="status" id="copyStatus"></div>
+    <div class="meta" id="metaLine"></div>
+  </div>
+</main>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyBTOCTWpzZQfOsBCqJIkKak2wgLVxzKUFc",
+  authDomain: "clipboard-relay.firebaseapp.com",
+  databaseURL: "https://clipboard-relay-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "clipboard-relay",
+  storageBucket: "clipboard-relay.firebasestorage.app",
+  messagingSenderId: "867402868844",
+  appId: "1:867402868844:web:fbf9cf9af4f4aa9e0bd049"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+const clipRef = ref(db, "clip/current");
+
+let latest = null; // {html, text, ts}
+
+const editor = document.getElementById('editor');
+const sendBtn = document.getElementById('sendBtn');
+const sendStatus = document.getElementById('sendStatus');
+const preview = document.getElementById('preview');
+const copyBtn = document.getElementById('copyBtn');
+const copyStatus = document.getElementById('copyStatus');
+const metaLine = document.getElementById('metaLine');
+
+let pendingHtml = '';
+let pendingText = '';
+
+editor.addEventListener('paste', (e) => {
+  e.preventDefault();
+  const cd = e.clipboardData;
+  pendingHtml = cd.getData('text/html') || '';
+  pendingText = cd.getData('text/plain') || '';
+  if (pendingHtml) {
+    editor.innerHTML = pendingHtml;
+  } else {
+    editor.innerText = pendingText;
+  }
+});
+
+editor.addEventListener('input', () => {
+  if (!pendingHtml || editor.innerText !== pendingText) {
+    pendingText = editor.innerText;
+  }
+});
+
+function fmtTime(ts) {
+  try { return new Date(ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
+  catch(e) { return ''; }
+}
+
+function renderLatest() {
+  if (!latest || (!latest.html && !latest.text)) {
+    preview.textContent = 'Nothing sent yet.';
+    copyBtn.disabled = true;
+    metaLine.textContent = '';
+    return;
+  }
+  preview.innerHTML = latest.html || latest.text.replace(/</g,'&lt;');
+  copyBtn.disabled = false;
+  metaLine.textContent = 'Last updated ' + fmtTime(latest.ts);
+}
+
+// Live sync: fires immediately with current value, then on every change
+onValue(clipRef, (snapshot) => {
+  const data = snapshot.val();
+  if (data) {
+    latest = data;
+    renderLatest();
+  } else {
+    preview.textContent = 'Nothing sent yet.';
+  }
+});
+
+sendBtn.addEventListener('click', async () => {
+  const html = pendingHtml || editor.innerHTML;
+  const text = pendingText || editor.innerText;
+  if (!text.trim() && !html.trim()) {
+    sendStatus.textContent = 'Nothing to send.';
+    return;
+  }
+  sendBtn.disabled = true;
+  sendStatus.textContent = 'Sending…';
+  try {
+    await set(clipRef, { html, text, ts: Date.now() });
+    sendStatus.textContent = 'Sent ✓';
+    sendStatus.className = 'status ok';
+    editor.innerHTML = '';
+    pendingHtml = ''; pendingText = '';
+  } catch (err) {
+    sendStatus.textContent = 'Failed to send — try again.';
+    sendStatus.className = 'status';
+  } finally {
+    sendBtn.disabled = false;
+    setTimeout(()=>{ sendStatus.textContent=''; }, 3000);
+  }
+});
+
+copyBtn.addEventListener('click', async () => {
+  if (!latest) return;
+  try {
+    if (window.ClipboardItem && latest.html) {
+      const item = new ClipboardItem({
+        'text/html': new Blob([latest.html], {type:'text/html'}),
+        'text/plain': new Blob([latest.text || ''], {type:'text/plain'})
+      });
+      await navigator.clipboard.write([item]);
+    } else {
+      await navigator.clipboard.writeText(latest.text || '');
+    }
+    copyStatus.textContent = 'Copied — paste into GoodNotes/anywhere ✓';
+    copyStatus.className = 'status ok';
+  } catch (err) {
+    try {
+      await navigator.clipboard.writeText(latest.text || '');
+      copyStatus.textContent = 'Copied as plain text (rich copy blocked here).';
+      copyStatus.className = 'status';
+    } catch (e2) {
+      copyStatus.textContent = 'Copy failed — long-press the box above and copy manually.';
+    }
+  }
+  setTimeout(()=>{ copyStatus.textContent=''; }, 4000);
+});
+</script>
+</body>
+</html>
